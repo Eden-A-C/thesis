@@ -79,3 +79,11 @@ x_test_defended_gaussian, _ = gaussian_defense(x_test_adv)
 predictions_gaussian = classifier.predict(x_test_defended_gaussian)
 accuracy_gaussian = np.sum(np.argmax(predictions_gaussian, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
 print("Accuracy after Gaussian Augmentation defense: {:.2f}%".format(accuracy_gaussian * 100))
+
+# Step 10: Apply Gaussian defense to benign (clean) examples
+x_test_clean_defended, _ = gaussian_defense(x_test)
+
+# Step 11: Evaluate the model on defended clean examples
+predictions_clean_defended = classifier.predict(x_test_clean_defended)
+accuracy_clean_defended = np.sum(np.argmax(predictions_clean_defended, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
+print("Accuracy on clean examples after Gaussian defense: {:.2f}%".format(accuracy_clean_defended * 100))

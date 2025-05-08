@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import torch.nn.utils.prune as prune
+import torch
 
 from art.attacks.evasion import FastGradientMethod
 from art.defences.trainer import AdversarialTrainer
@@ -36,9 +37,9 @@ class Net(nn.Module):
         x = self.fc_2(x)
         return x
 
+
 # Step 1: Load the MNIST dataset
 (x_train, y_train), (x_test, y_test), min_pixel_value, max_pixel_value = load_mnist()
-
 
 # Step 1a: Swap axes to PyTorch's NCHW format
 x_train = np.transpose(x_train, (0, 3, 1, 2)).astype(np.float32)
@@ -64,30 +65,42 @@ classifier = PyTorchClassifier(
 # Step 4: Train the ART classifier
 classifier.fit(x_train, y_train, batch_size=64, nb_epochs=3)
 
-# Step 5: Evaluate the ART classifier on benign test examples
-predictions = classifier.predict(x_test)
-accuracy = np.sum(np.argmax(predictions, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
-print("Accuracy on benign test examples: {}%".format(accuracy * 100))
-
-# Step 6: Generate adversarial test examples
+# Step 5: Generate adversarial test examples
 attack = FastGradientMethod(estimator=classifier, eps=0.2)
 x_test_adv = attack.generate(x=x_test)
 
-# Step 7: Evaluate the ART classifier on adversarial test examples
-predictions_adv = classifier.predict(x_test_adv)
-accuracy_adv = np.sum(np.argmax(predictions_adv, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
-print("Accuracy on adversarial test examples: {}%".format(accuracy_adv * 100))
+# Step 6: Apply pruning to the existing model
+for name, module in model.named_modules():
+    if isinstance(module, (nn.Conv2d, nn.Linear)):
+        prune.l1_unstructured(module, name="weight", amount=0.9)
+        prune.remove(module, "weight")  # Permanently apply pruning
 
-# Step 8: Apply adversarial defence - Adversarial Training
-trainer = AdversarialTrainer(classifier, attacks=attack, ratio=0.5)
-trainer.fit(x_train, y_train, nb_epochs=3, batch_size=64)
+# Step 7: Create a new classifier with the pruned model
+optimizer_pruned = optim.Adam(model.parameters(), lr=0.01)  # New optimizer for the pruned model
+classifier_pruned = PyTorchClassifier(
+    model=model,
+    clip_values=(min_pixel_value, max_pixel_value),
+    loss=criterion,
+    optimizer=optimizer_pruned,
+    input_shape=(1, 28, 28),
+    nb_classes=10,
+)
 
-# Step 9: Evaluate the defended model on adversarial examples
-predictions_defended = classifier.predict(x_test_adv)
-accuracy_defended = np.sum(np.argmax(predictions_defended, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
-print("Accuracy on adversarial examples after defence: {}%".format(accuracy_defended * 100))
+# Step 8: Evaluate the pruned model on benign test examples
+predictions_pruned = classifier_pruned.predict(x_test)
+accuracy_pruned = np.sum(np.argmax(predictions_pruned, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
+print("Accuracy on benign test examples (pruned model): {:.2f}%".format(accuracy_pruned * 100))
 
-# Step 10: Re-evaluate on benign examples
-pred_ben_def = classifier.predict(x_test)
-acc_ben_def = np.mean(np.argmax(pred_ben_def, axis=1) == np.argmax(y_test, axis=1))
-print("Accuracy on benign test examples after adversarial training: {:.2f}%".format(acc_ben_def * 100))
+# Step 9: Evaluate the pruned model on adversarial test examples
+predictions_pruned_adv = classifier_pruned.predict(x_test_adv)
+accuracy_pruned_adv = np.sum(np.argmax(predictions_pruned_adv, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
+print("Accuracy on adversarial test examples (pruned model): {:.2f}%".format(accuracy_pruned_adv * 100))
+
+# Step 10: Apply adversarial defence to the pruned model - Adversarial Training
+pruned_trainer = AdversarialTrainer(classifier_pruned, attacks=attack, ratio=0.5)
+pruned_trainer.fit(x_train, y_train, nb_epochs=3, batch_size=64)
+
+# Step 11: Evaluate the pruned and defended model on adversarial test examples
+predictions_pruned_defended_adv = classifier_pruned.predict(x_test_adv)
+accuracy_pruned_defended_adv = np.sum(np.argmax(predictions_pruned_defended_adv, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
+print("Accuracy on adversarial test examples (pruned model) after defence: {:.2f}%".format(accuracy_pruned_defended_adv * 100))

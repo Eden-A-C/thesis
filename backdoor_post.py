@@ -37,7 +37,6 @@ x_train = np.transpose(x_train, (0, 3, 1, 2)).astype(np.float32)
 x_test = np.transpose(x_test, (0, 3, 1, 2)).astype(np.float32)
 
 # Add backdoor
-
 def add_backdoor_trigger(x):
     x = np.copy(x)
     x[:, :, 24:28, 24:28] = max_val
@@ -50,59 +49,62 @@ y_poisoned[:, 1] = 1  # All mislabelled to class 1
 x_train_poisoned = np.concatenate((x_train, x_poisoned))
 y_train_poisoned = np.concatenate((y_train, y_poisoned))
 
-# Build poison mask
+# Poison mask for evaluation
 y_clean_len = len(x_train)
 y_poison_len = len(x_poisoned)
 is_poison_train = np.concatenate((np.zeros(y_clean_len), np.ones(y_poison_len))).astype(bool)
 is_clean = ~is_poison_train
 
-# Apply pre-pruning before training
+# Train poisoned model (no pruning yet)
 model = Net()
-
-# Train initial poisoned model
-criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.01)
 classifier = PyTorchClassifier(
     model=model,
     clip_values=(min_val, max_val),
-    loss=criterion,
+    loss=nn.CrossEntropyLoss(),
     optimizer=optimizer,
     input_shape=(1, 28, 28),
     nb_classes=10,
 )
 classifier.fit(x_train_poisoned, y_train_poisoned, batch_size=64, nb_epochs=3)
 
-# Evaluate model BEFORE defence
+# Apply post-pruning after training
+for name, module in model.named_modules():
+    if isinstance(module, (nn.Conv2d, nn.Linear)):
+        prune.l1_unstructured(module, name="weight", amount=0.3)
+        prune.remove(module, "weight")
+
+# Evaluate poisoned model
 pred_clean = classifier.predict(x_test)
 acc_clean = np.mean(np.argmax(pred_clean, axis=1) == np.argmax(y_test, axis=1))
-print("\nAccuracy of model on clean test examples (before defence): {:.2f}%".format(acc_clean * 100))
+print("\n✅ Accuracy of model on clean test examples (before defence): {:.2f}%".format(acc_clean * 100))
 
 x_test_backdoor = add_backdoor_trigger(x_test[:500])
 pred_backdoor = classifier.predict(x_test_backdoor)
 acc_backdoor = np.mean(np.argmax(pred_backdoor, axis=1) == 1)
-print("\nAccuracy after backdoor attack (classified as 1): {:.2f}%".format(acc_backdoor * 100))
+print("\u2705 Accuracy after backdoor attack (classified as 1): {:.2f}%".format(acc_backdoor * 100))
 
 # Activation defence
-activation_defence = ActivationDefence(classifier, x_train_poisoned, y_train_poisoned)
-activation_defence.detect_poison(nb_clusters=2, nb_dims=10, reduce="PCA")
-conf_matrix = activation_defence.evaluate_defence(is_clean)
+defence = ActivationDefence(classifier, x_train_poisoned, y_train_poisoned)
+defence.detect_poison(nb_clusters=2, nb_dims=10, reduce="PCA")
+conf_matrix = defence.evaluate_defence(is_clean)
 
 # Print confusion matrix
-print("\nActivation Defence Confusion Matrix:\n")
+print("\n\U0001F6A7 Activation Defence Confusion Matrix:\n")
 for label, stats in json.loads(conf_matrix).items():
     print(f"Class {label}:")
     pprint.pprint(stats)
 
-# Clean dataset
-suspect_indices = np.where(is_clean == False)[0]
+# Remove poisoned samples
+suspect_indices = np.where(is_poison_train)[0]
 x_cleaned = np.delete(x_train_poisoned, suspect_indices, axis=0)
 y_cleaned = np.delete(y_train_poisoned, suspect_indices, axis=0)
 
-# Retrain model on cleaned data
-clean_model = Net()
-optimizer_clean = optim.Adam(clean_model.parameters(), lr=0.01)
+# Retrain model on cleaned data (no pruning yet)
+defended_model = Net()
+optimizer_clean = optim.Adam(defended_model.parameters(), lr=0.01)
 classifier_clean = PyTorchClassifier(
-    model=clean_model,
+    model=defended_model,
     clip_values=(min_val, max_val),
     loss=nn.CrossEntropyLoss(),
     optimizer=optimizer_clean,
@@ -111,13 +113,18 @@ classifier_clean = PyTorchClassifier(
 )
 classifier_clean.fit(x_cleaned, y_cleaned, batch_size=64, nb_epochs=3)
 
-# Evaluate on clean test set
+# Apply post-pruning after training the cleaned model
+for name, module in defended_model.named_modules():
+    if isinstance(module, (nn.Conv2d, nn.Linear)):
+        prune.l1_unstructured(module, name="weight", amount=0.3)
+        prune.remove(module, "weight")
+
+# Evaluate cleaned model
 pred_clean = classifier_clean.predict(x_test)
 acc_clean = np.mean(np.argmax(pred_clean, axis=1) == np.argmax(y_test, axis=1))
-print(f"\nAccuracy on clean test data after removing poison: {acc_clean * 100:.2f}%")
+print(f"\n✅ Accuracy on clean test data after removing poison: {acc_clean * 100:.2f}%")
 
-# Evaluate on backdoor triggered test set
 x_test_backdoor = add_backdoor_trigger(x_test[:500])
 pred_backdoor = classifier_clean.predict(x_test_backdoor)
 acc_backdoor = np.mean(np.argmax(pred_backdoor, axis=1) == 1)
-print(f"Accuracy on backdoor-triggered test data after removing poison (classified as 1): {acc_backdoor * 100:.2f}%")
+print(f"✅ Accuracy on backdoor-triggered test data after removing poison (classified as 1): {acc_backdoor * 100:.2f}%")

@@ -6,7 +6,7 @@ import numpy as np
 import torch.nn.utils.prune as prune
 
 from art.attacks.evasion import ProjectedGradientDescent
-from art.defences.preprocessor import GaussianAugmentation
+from art.defences.preprocessor import PixelDefend, GaussianAugmentation
 from art.estimators.classification import PyTorchClassifier
 from art.utils import load_mnist
 
@@ -29,21 +29,17 @@ class Net(nn.Module):
         x = self.fc_2(x)
         return x
 
-# Step 1: Load MNIST dataset
+# Step 1: Load the MNIST dataset
 (x_train, y_train), (x_test, y_test), min_pixel_value, max_pixel_value = load_mnist()
 x_train = np.transpose(x_train, (0, 3, 1, 2)).astype(np.float32)
 x_test = np.transpose(x_test, (0, 3, 1, 2)).astype(np.float32)
 
-# Step 2: Initialize and prune the model BEFORE training (pre-pruning)
+# Step 2: Create the model
 model = Net()
-for name, module in model.named_modules():
-    if isinstance(module, (nn.Conv2d, nn.Linear)):
-        prune.l1_unstructured(module, name="weight", amount=0.9)
-        prune.remove(module, "weight")  # Apply pruning permanently
-
-# Step 3: Create the ART classifier
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+# Step 3: Create the ART classifier
 classifier = PyTorchClassifier(
     model=model,
     clip_values=(min_pixel_value, max_pixel_value),
@@ -53,41 +49,40 @@ classifier = PyTorchClassifier(
     nb_classes=10,
 )
 
-# Step 4: Train the pruned model
+# Step 4: Train the classifier on clean data
 classifier.fit(x_train, y_train, batch_size=64, nb_epochs=3)
 
-# Step 5: Evaluate the pruned model on clean test data
+# Step 6: Apply pruning to the existing model
+for name, module in model.named_modules():
+    if isinstance(module, (nn.Conv2d, nn.Linear)):
+        prune.l1_unstructured(module, name="weight", amount=0.9)
+        prune.remove(module, "weight")  # Permanently apply pruning
+
+# Step 5: Evaluate the model on clean test data
 predictions = classifier.predict(x_test)
 accuracy_clean = np.sum(np.argmax(predictions, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
-print("Accuracy on clean test examples (pre-pruned): {:.2f}%".format(accuracy_clean * 100))
+print("Accuracy on clean test examples: {}%".format(accuracy_clean * 100))
 
-# Step 6: Generate adversarial examples using PGD
+# Step 6: Generate adversarial examples using PGD attack
 attack = ProjectedGradientDescent(
     estimator=classifier,
-    eps=0.3,
+    eps=0.3,  # Maximum perturbation
     eps_step=0.01,
     max_iter=40
 )
+
 x_test_adv = attack.generate(x=x_test)
 
-# Step 7: Evaluate the pruned model on adversarial examples
+# Step 7: Evaluate model on adversarial examples
 predictions_adv = classifier.predict(x_test_adv)
 accuracy_adv = np.sum(np.argmax(predictions_adv, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
-print("Accuracy on adversarial examples (PGD, pre-pruned): {:.2f}%".format(accuracy_adv * 100))
+print("Accuracy on adversarial examples: {}%".format(accuracy_adv * 100))
 
-# Step 8: Apply Gaussian augmentation defense
+# Step 8: Apply Gaussian defense
 gaussian_defense = GaussianAugmentation(sigma=0.4, augmentation=False)
 x_test_defended_gaussian, _ = gaussian_defense(x_test_adv)
 
-# Step 9: Evaluate the model on defended adversarial examples
+# Step 9: Evaluate model after defense
 predictions_gaussian = classifier.predict(x_test_defended_gaussian)
 accuracy_gaussian = np.sum(np.argmax(predictions_gaussian, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
-print("Accuracy after Gaussian defense (pre-pruned): {:.2f}%".format(accuracy_gaussian * 100))
-
-# Step 10: Apply Gaussian defense to benign (clean) examples
-x_test_clean_defended, _ = gaussian_defense(x_test)
-
-# Step 11: Evaluate the model on defended clean examples
-predictions_clean_defended = classifier.predict(x_test_clean_defended)
-accuracy_clean_defended = np.sum(np.argmax(predictions_clean_defended, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
-print("Accuracy on clean examples after Gaussian defense (pre-pruned): {:.2f}%".format(accuracy_clean_defended * 100))
+print("Accuracy after Gaussian Augmentation defense: {:.2f}%".format(accuracy_gaussian * 100))
